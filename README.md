@@ -1,5 +1,7 @@
 # HyMT
 
+[中文说明](README.zh-CN.md)
+
 HyMT is an iOS local translation app based on `llama.cpp`.
 
 This branch is only intended for running Tencent Hy-MT / Hy-MT2 GGUF translation models on iPhone. It is not a general-purpose `llama.cpp` distribution branch.
@@ -17,6 +19,20 @@ This branch is only intended for running Tencent Hy-MT / Hy-MT2 GGUF translation
 - It is not meant to replace upstream `llama.cpp`
 - It is not a general model browser for arbitrary GGUF files
 - It currently targets CPU inference on iPhone
+
+## A15 Performance
+
+On an A15 iPhone, the Hy-MT2-1.8B 1.25Bit GGUF model reached about **17 tokens/s** in local translation inference.
+
+In the same app/device test, the Hy-MT2-1.8B Q8 model reached about **0.22 tokens/s**.
+
+That makes the 1.25Bit model about **77x faster** than Q8 in this A15 test:
+
+```text
+17 / 0.22 = 77.27
+```
+
+These numbers are device- and prompt-dependent, but they show why this branch focuses on low-bit Hy-MT2 inference for iPhone.
 
 ## App Location
 
