@@ -1,3 +1,14 @@
+# HyMT iOS fork
+
+This branch contains **HyMT**, an iOS local translation app built on `llama.cpp` for Hy-MT2 GGUF models.
+
+- App code: `examples/llama.swiftui`
+- Project notes: [`README-HyMT.md`](README-HyMT.md)
+- Attribution and model license notes: [`NOTICE-HyMT.md`](NOTICE-HyMT.md)
+- Model weights are **not redistributed** in this repository.
+
+---
+
 # llama.cpp
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)

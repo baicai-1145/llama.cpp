@@ -1,6 +1,17 @@
 import Foundation
 import llama
 
+extension KVCacheType {
+    var ggmlType: ggml_type {
+        switch self {
+        case .f16:
+            return GGML_TYPE_F16
+        case .q8_0:
+            return GGML_TYPE_Q8_0
+        }
+    }
+}
+
 enum LlamaError: Error {
     case couldNotInitializeContext
 }
@@ -22,11 +33,16 @@ func llama_batch_add(_ batch: inout llama_batch, _ id: llama_token, _ pos: llama
 }
 
 actor LlamaContext {
+    static let configuredContextSize: UInt32 = 4096
+    static let configuredMaxNewTokens: Int32 = 1024
+
     private var model: OpaquePointer
     private var context: OpaquePointer
     private var vocab: OpaquePointer
     private var sampling: UnsafeMutablePointer<llama_sampler>
     private var batch: llama_batch
+    private let batchCapacity: Int32 = 2048
+    private let maxNewTokens: Int32 = LlamaContext.configuredMaxNewTokens
     private var tokens_list: [llama_token]
     var is_done: Bool = false
 
@@ -42,11 +58,13 @@ actor LlamaContext {
         self.model = model
         self.context = context
         self.tokens_list = []
-        self.batch = llama_batch_init(512, 0, 1)
+        self.batch = llama_batch_init(batchCapacity, 0, 1)
         self.temporary_invalid_cchars = []
         let sparams = llama_sampler_chain_default_params()
         self.sampling = llama_sampler_chain_init(sparams)
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
+        llama_sampler_chain_add(self.sampling, llama_sampler_init_top_k(20))
+        llama_sampler_chain_add(self.sampling, llama_sampler_init_top_p(0.6, 1))
+        llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.7))
         llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
         vocab = llama_model_get_vocab(model)
     }
@@ -59,13 +77,14 @@ actor LlamaContext {
         llama_backend_free()
     }
 
-    static func create_context(path: String) throws -> LlamaContext {
+    static func create_context(path: String, kvCacheType: KVCacheType = .f16) throws -> LlamaContext {
         llama_backend_init()
         var model_params = llama_model_default_params()
+        model_params.n_gpu_layers = 0
+        print("Force use n_gpu_layers = 0 for Hy-MT2 STQ GGUF")
 
 #if targetEnvironment(simulator)
-        model_params.n_gpu_layers = 0
-        print("Running on simulator, force use n_gpu_layers = 0")
+        print("Running on simulator")
 #endif
         let model = llama_model_load_from_file(path, model_params)
         guard let model else {
@@ -77,9 +96,14 @@ actor LlamaContext {
         print("Using \(n_threads) threads")
 
         var ctx_params = llama_context_default_params()
-        ctx_params.n_ctx = 2048
+        ctx_params.n_ctx = LlamaContext.configuredContextSize
+        ctx_params.n_batch = 2048
+        ctx_params.n_ubatch = 512
         ctx_params.n_threads       = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
+        ctx_params.type_k = kvCacheType.ggmlType
+        ctx_params.type_v = kvCacheType.ggmlType
+        print("Using KV cache type \(kvCacheType.title)")
 
         let context = llama_init_from_model(model, ctx_params)
         guard let context else {
@@ -99,15 +123,8 @@ actor LlamaContext {
 
         // TODO: this is probably very stupid way to get the string from C
 
-        let nChars = llama_model_desc(model, result, 256)
-        let bufferPointer = UnsafeBufferPointer(start: result, count: Int(nChars))
-
-        var SwiftString = ""
-        for char in bufferPointer {
-            SwiftString.append(Character(UnicodeScalar(UInt8(char))))
-        }
-
-        return SwiftString
+        _ = llama_model_desc(model, result, 256)
+        return String(cString: result)
     }
 
     func get_n_tokens() -> Int32 {
@@ -117,16 +134,36 @@ actor LlamaContext {
     func completion_init(text: String) {
         print("attempting to complete \"\(text)\"")
 
+        is_done = false
+        n_decode = 0
+        n_cur = 0
         tokens_list = tokenize(text: text, add_bos: true)
         temporary_invalid_cchars = []
+        llama_sampler_reset(sampling)
+        llama_memory_clear(llama_get_memory(context), true)
 
         let n_ctx = llama_n_ctx(context)
-        let n_kv_req = tokens_list.count + (Int(n_len) - tokens_list.count)
+        n_len = min(Int32(n_ctx), Int32(tokens_list.count) + maxNewTokens)
+        let n_kv_req = Int(n_len)
 
         print("\n n_len = \(n_len), n_ctx = \(n_ctx), n_kv_req = \(n_kv_req)")
 
-        if n_kv_req > n_ctx {
+        if tokens_list.isEmpty {
+            print("error: tokenization returned no tokens")
+            is_done = true
+            return
+        }
+
+        if tokens_list.count > Int(batchCapacity) {
+            print("error: prompt is too long for batch capacity \(batchCapacity): \(tokens_list.count) tokens")
+            is_done = true
+            return
+        }
+
+        if n_kv_req > n_ctx || tokens_list.count >= Int(n_ctx) {
             print("error: n_kv_req > n_ctx, the required KV cache size is not big enough")
+            is_done = true
+            return
         }
 
         for id in tokens_list {
@@ -143,6 +180,8 @@ actor LlamaContext {
 
         if llama_decode(context, batch) != 0 {
             print("llama_decode() failed")
+            is_done = true
+            return
         }
 
         n_cur = batch.n_tokens
@@ -151,7 +190,12 @@ actor LlamaContext {
     func completion_loop() -> String {
         var new_token_id: llama_token = 0
 
-        new_token_id = llama_sampler_sample(sampling, context, batch.n_tokens - 1)
+        guard !is_done, batch.n_tokens > 0 else {
+            is_done = true
+            return ""
+        }
+
+        new_token_id = llama_sampler_sample(sampling, context, -1)
 
         if llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len {
             print("\n")
@@ -176,6 +220,7 @@ actor LlamaContext {
             new_token_str = ""
         }
         print(new_token_str)
+        llama_sampler_accept(sampling, new_token_id)
         // tokens_list.append(new_token_id)
 
         llama_batch_clear(&batch)
@@ -186,6 +231,7 @@ actor LlamaContext {
 
         if llama_decode(context, batch) != 0 {
             print("failed to evaluate llama!")
+            is_done = true
         }
 
         return new_token_str
@@ -202,11 +248,12 @@ actor LlamaContext {
             // bench prompt processing
 
             llama_batch_clear(&batch)
+            let benchTokens = make_bench_tokens(count: max(pp, max(tg * pl, 1)))
 
             let n_tokens = pp
 
             for i in 0..<n_tokens {
-                llama_batch_add(&batch, 0, Int32(i), [0], false)
+                llama_batch_add(&batch, benchTokens[i % benchTokens.count], Int32(i), [0], false)
             }
             batch.logits[Int(batch.n_tokens) - 1] = 1 // true
 
@@ -231,7 +278,7 @@ actor LlamaContext {
                 llama_batch_clear(&batch)
 
                 for j in 0..<pl {
-                    llama_batch_add(&batch, 0, Int32(i), [Int32(j)], true)
+                    llama_batch_add(&batch, benchTokens[(i * pl + j) % benchTokens.count], Int32(i), [Int32(j)], true)
                 }
 
                 if llama_decode(context, batch) != 0 {
@@ -273,7 +320,7 @@ actor LlamaContext {
         let model_desc     = model_info();
         let model_size     = String(format: "%.2f GiB", Double(llama_model_size(model)) / 1024.0 / 1024.0 / 1024.0);
         let model_n_params = String(format: "%.2f B", Double(llama_model_n_params(model)) / 1e9);
-        let backend        = "Metal";
+        let backend        = "CPU";
         let pp_avg_str     = String(format: "%.2f", pp_avg);
         let tg_avg_str     = String(format: "%.2f", tg_avg);
         let pp_std_str     = String(format: "%.2f", pp_std);
@@ -292,23 +339,53 @@ actor LlamaContext {
     func clear() {
         tokens_list.removeAll()
         temporary_invalid_cchars.removeAll()
+        is_done = true
+        n_cur = 0
+        n_decode = 0
+        llama_sampler_reset(sampling)
         llama_memory_clear(llama_get_memory(context), true)
     }
 
     private func tokenize(text: String, add_bos: Bool) -> [llama_token] {
         let utf8Count = text.utf8.count
-        let n_tokens = utf8Count + (add_bos ? 1 : 0) + 1
+        let n_tokens = max(1, utf8Count + (add_bos ? 1 : 0) + 1)
         let tokens = UnsafeMutablePointer<llama_token>.allocate(capacity: n_tokens)
-        let tokenCount = llama_tokenize(vocab, text, Int32(utf8Count), tokens, Int32(n_tokens), add_bos, false)
+        defer {
+            tokens.deallocate()
+        }
+        var tokenCount = llama_tokenize(vocab, text, Int32(utf8Count), tokens, Int32(n_tokens), add_bos, true)
 
-        var swiftTokens: [llama_token] = []
-        for i in 0..<tokenCount {
-            swiftTokens.append(tokens[Int(i)])
+        if tokenCount < 0 {
+            let requiredTokens = Int(-tokenCount)
+            let resizedTokens = UnsafeMutablePointer<llama_token>.allocate(capacity: requiredTokens)
+            defer {
+                resizedTokens.deallocate()
+            }
+            tokenCount = llama_tokenize(vocab, text, Int32(utf8Count), resizedTokens, Int32(requiredTokens), add_bos, true)
+            guard tokenCount >= 0 else {
+                print("llama_tokenize() failed with token count \(tokenCount)")
+                return []
+            }
+            return Array(UnsafeBufferPointer(start: resizedTokens, count: Int(tokenCount)))
         }
 
-        tokens.deallocate()
+        guard tokenCount >= 0 else {
+            print("llama_tokenize() failed with token count \(tokenCount)")
+            return []
+        }
 
-        return swiftTokens
+        return Array(UnsafeBufferPointer(start: tokens, count: Int(tokenCount)))
+    }
+
+    private func make_bench_tokens(count: Int) -> [llama_token] {
+        var tokens = tokenize(text: "The quick brown fox jumps over the lazy dog.", add_bos: true)
+        if tokens.isEmpty {
+            tokens = [llama_vocab_bos(vocab)]
+        }
+        while tokens.count < count {
+            tokens.append(contentsOf: tokens)
+        }
+        return Array(tokens.prefix(count))
     }
 
     /// - note: The result does not contain null-terminator
