@@ -22,6 +22,10 @@ This branch is only intended for running Tencent Hy-MT / Hy-MT2 GGUF translation
 
 ## A15 Performance
 
+![HyMT iPhone speed comparison: 1.25Bit, Q4_K_M, Q6_K, and Q8_0](media/hymt-iphone-speed-demo.gif)
+
+The demo above shows the same HyMT iOS app running Hy-MT2-1.8B 1.25Bit, Q4_K_M, Q6_K, and Q8_0 variants on iPhone.
+
 On an A15 iPhone, the Hy-MT2-1.8B 1.25Bit GGUF model reached about **17 tokens/s** in local translation inference.
 
 In the same app/device test, the Hy-MT2-1.8B Q8 model reached about **0.22 tokens/s**.

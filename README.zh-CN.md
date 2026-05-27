@@ -20,6 +20,10 @@ HyMT 是一个基于 `llama.cpp` 的 iOS 本地翻译 app。
 
 ## A15 实测速度
 
+![HyMT iPhone 速度对比：1.25Bit、Q4_K_M、Q6_K、Q8_0](media/hymt-iphone-speed-demo.gif)
+
+上面的演示图展示了同一个 HyMT iOS app 在 iPhone 上运行 Hy-MT2-1.8B 1.25Bit、Q4_K_M、Q6_K、Q8_0 版本的效果。
+
 在 A15 芯片的 iPhone 上，Hy-MT2-1.8B 1.25Bit GGUF 模型本地翻译推理约为 **17 tokens/s**。
 
 同一 app、同一设备测试中，Hy-MT2-1.8B Q8 模型约为 **0.22 tokens/s**。
