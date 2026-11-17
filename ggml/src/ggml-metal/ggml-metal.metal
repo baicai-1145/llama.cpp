@@ -8838,17 +8838,15 @@ void kernel_mul_mv_stq1_0_f32_impl(
     device const char  * x = src0 + offset0;
     device const float * y = (device const float *) (src1 + offset1);
 
-    // this lane owns group tiisg of a 128-weight half, for both halves of the block,
-    // i.e. 8 weights in total and 8 activation values per block. the in-block offsets
-    // are the same for every block, only the block base advances.
-    const short ic = tiisg/16; // 0, 1: which chunk of the 128-weight half
-    const short ig = tiisg%16; // 0...15: group within the chunk
-
-    const int  iy   = ic*64 + ig;
-    const uint iq   = ic*8 + ig/2;  // qs byte of the first half (second half: +16)
-    const uint isn  = ic*2 + ig/8;  // sign byte of the first half (second half: +4)
-    const uint ibit = ig%8;
-    const uint ish  = 4*(ig&1);
+    // a 256-weight block holds 64 groups of 4 lanes, and 64 groups fit in the 32 code
+    // bytes of qs exactly 2 per byte. so a lane takes one whole qs byte, i.e a pair of
+    // adjacent groups, which makes its 8 weights two neighbouring values of every 16th
+    // element: 1 code load + 1 sign load + 4 float2 activation loads per block, and the
+    // activation offsets are identical in every block.
+    const short ich  = tiisg/8;      // 0..3: chunk of 64 weights
+    const short ig2  = tiisg%8;      // 0..7 : group pair inside the chunk
+    const int   iy2  = ich*64 + 2*ig2;   // first of the two adjacent weight indices
+    const uint  ibit = (tiisg%4)*2;      // first of the two sign bits
 
     const int nr = MIN(nr0, args.ne0 - first_row);
 
@@ -8867,38 +8865,32 @@ void kernel_mul_mv_stq1_0_f32_impl(
     float sumf[nr0] = {0.f};
 
     for (int ib = 0; ib < nb; ++ib) {
-        device const float * yb = y + ib*QK_K;
+        device const float2 * yb = (device const float2 *) (y + ib*QK_K + iy2);
 
-        float yl[8];
-        yl[0] = yb[iy +   0];
-        yl[1] = yb[iy +  16];
-        yl[2] = yb[iy +  32];
-        yl[3] = yb[iy +  48];
-        yl[4] = yb[iy + 128];
-        yl[5] = yb[iy + 144];
-        yl[6] = yb[iy + 160];
-        yl[7] = yb[iy + 176];
+        float2 yv[4];
+        yv[0] = yb[0];
+        yv[1] = yb[8];
+        yv[2] = yb[16];
+        yv[3] = yb[24];
 
         for (short row = 0; row < nr; ++row) {
             device const block_stq1_0 * xb = (device const block_stq1_0 *) (x + row*args.nb01 + ib*sizeof(block_stq1_0));
 
-            const uint8_t qs0 = xb->qs[iq];
-            const uint8_t qs1 = xb->qs[iq + 16];
-            const uint8_t sn0 = xb->sign[isn];
-            const uint8_t sn1 = xb->sign[isn + 4];
+            const uint8_t qsb = xb->qs[tiisg];        // groups 2b and 2b+1
+            const uint8_t snb = xb->sign[tiisg/4];    // 4 lanes per sign byte
 
-            const float4 cb0 = scb4[(((sn0 >> ibit) & 1) << 4) | ((qs0 >> ish) & 0x0F)];
-            const float4 cb1 = scb4[(((sn1 >> ibit) & 1) << 4) | ((qs1 >> ish) & 0x0F)];
+            const float4 cb0 = scb4[((((snb >> ibit    ) & 1) << 4) | ((qsb      ) & 0x0F))];
+            const float4 cb1 = scb4[((((snb >> (ibit+1)) & 1) << 4) | ((qsb >> 4 ) & 0x0F))];
 
             float acc = 0.0f;
-            acc = fma(cb0.x, yl[0], acc);
-            acc = fma(cb0.y, yl[1], acc);
-            acc = fma(cb0.z, yl[2], acc);
-            acc = fma(cb0.w, yl[3], acc);
-            acc = fma(cb1.x, yl[4], acc);
-            acc = fma(cb1.y, yl[5], acc);
-            acc = fma(cb1.z, yl[6], acc);
-            acc = fma(cb1.w, yl[7], acc);
+            acc = fma(cb0.x, yv[0].x, acc);
+            acc = fma(cb1.x, yv[0].y, acc);
+            acc = fma(cb0.y, yv[1].x, acc);
+            acc = fma(cb1.y, yv[1].y, acc);
+            acc = fma(cb0.z, yv[2].x, acc);
+            acc = fma(cb1.z, yv[2].y, acc);
+            acc = fma(cb0.w, yv[3].x, acc);
+            acc = fma(cb1.w, yv[3].y, acc);
 
             sumf[row] += (float) xb->d * acc;
         }
