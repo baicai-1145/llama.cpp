@@ -8862,10 +8862,24 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
+    // STQ1_0: the shapes qwen3-0.6B actually runs - 151936 rows (output projection, r0 tail)
+    // and a 1024-wide attn/mlp row, small batch so mul_mv_ext is selected
+    for (int bs : {1, 8, 16}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32, 151936, bs, 1024, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32,   3072, bs, 1024, {1, 1}, {1, 1}));
+    }
+
     // STQ1_0: multi-block rows (k > QK_K) - the only coverage for rows wider than one super-block
     for (int k : {768, 1536}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32, 256,  1, k, {1, 1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32, 256, 16, k, {1, 1}, {1, 1}));
+    }
+
+    // mul_mv_ext (small-batch mat-vec, bs 2..8 with ne00 % 128 == 0) has its own lane
+    // layout, so cover every batch size and a second block count explicitly
+    for (int bs : {2, 3, 4, 5, 6, 7}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32, 4096, bs, 14336, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_STQ1_0, GGML_TYPE_F32, 4096, bs,   768, {1, 1}, {1, 1}));
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));

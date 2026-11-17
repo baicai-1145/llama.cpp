@@ -2357,6 +2357,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
            op->src[0]->type == GGML_TYPE_Q6_K ||
            op->src[0]->type == GGML_TYPE_Q2_K ||
            op->src[0]->type == GGML_TYPE_Q3_K ||
+           op->src[0]->type == GGML_TYPE_STQ1_0 ||
            false) && (ne11 >= 4 && ne11 <= 8)
          )
         )
